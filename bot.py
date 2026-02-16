@@ -109,37 +109,9 @@ async def scan_loop():
     channel = client.get_channel(CHANNEL_ID)
 
     while not client.is_closed():
-        try:
-            # EXEMPLE : recherche simple Leboncoin (à améliorer ensuite)
-            url = "https://www.leboncoin.fr/recherche?text=iphone"
-            r = requests.get(url)
-            soup = BeautifulSoup(r.text, "html.parser")
+        await channel.send("🔍 Scan en cours...")
+        await asyncio.sleep(30)
 
-            ads = soup.find_all("a", href=True)
-
-            for ad in ads:
-                title = ad.get_text()
-                link = ad["href"]
-
-                if not title or "iphone" not in title.lower():
-                    continue
-
-                price = extract_price(title)
-                if not price:
-                    continue
-
-                key = f"{title}-{price}"
-                if key in seen_ads:
-                    continue
-
-                seen_ads[key] = time.time()
-
-                await send_alert(channel, title, price, link)
-
-        except Exception as e:
-            print("Erreur:", e)
-
-        await asyncio.sleep(SCAN_INTERVAL)
 
 @client.event
 async def on_ready():

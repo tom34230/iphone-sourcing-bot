@@ -208,4 +208,5 @@ async def on_ready():
     print(f"Bot connecté en tant que {client.user}")
     client.loop.create_task(scan_loop())
 
+
 client.run(TOKEN)

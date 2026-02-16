@@ -109,8 +109,10 @@ async def scan_loop():
     channel = client.get_channel(CHANNEL_ID)
 
     while not client.is_closed():
-        await channel.send("🔍 Scan en cours...")
-        await asyncio.sleep(30)
+        print("Scan actif")
+        await channel.send("Je suis vivant 👀")
+        await asyncio.sleep(60)
+
 
 
 @client.event

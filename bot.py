@@ -1,6 +1,5 @@
 import os
 import asyncio
-import time
 import re
 import discord
 from playwright.async_api import async_playwright
@@ -8,135 +7,127 @@ from playwright.async_api import async_playwright
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
 
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "30"))  # secondes
-DEBUG_FIRST_N = int(os.getenv("DEBUG_FIRST_N", "3"))   # envoie 3 annonces au début
+VINTED_URL = "https://www.vinted.fr/catalog?search_text=iphone"
 
-# Recherche Vinted (newest first)
-VINTED_URL = (
-    "https://www.vinted.fr/catalog"
-    "?search_text=iphone"
-    "&order=newest_first"
-)
+SCAN_INTERVAL = 30
+DEBUG_FIRST_N = 3
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
 seen = set()
-debug_sent = 0
 
-
-def extract_price(text: str):
-    # Ex: "100,00 €" ou "100 €"
-    m = re.search(r"(\d+(?:[.,]\d{1,2})?)\s*€", text)
-    if not m:
-        return None
-    return float(m.group(1).replace(",", "."))
-
-
-async def send_item(channel, title, price, url, img=None, source="VINTED"):
-    embed = discord.Embed(
-        title=f"[{source}] {title}",
-        description=f"💰 {price} €\n🔗 {url}",
-    )
-    if img:
-        embed.set_thumbnail(url=img)
-    await channel.send(embed=embed)
-
+def extract_price(text):
+    match = re.search(r'(\d+)[.,]?\d*\s?€', text)
+    if match:
+        return int(match.group(1))
+    return None
 
 async def fetch_vinted_items(page):
-    # Charge la page
     await page.goto(VINTED_URL, wait_until="domcontentloaded", timeout=60000)
-    # Un petit wait pour laisser le temps au rendu
-    await page.wait_for_timeout(1500)
 
-    # Vinted change parfois ses classes, donc on prend un sélecteur large :
-    # liens contenant /items/
+    # Accepter cookies si présents
+    for txt in ["Tout accepter", "Accepter", "J'accepte", "OK"]:
+        btn = page.get_by_role("button", name=txt)
+        if await btn.count() > 0:
+            try:
+                await btn.first.click(timeout=2000)
+                break
+            except:
+                pass
+
+    # Attendre que des annonces apparaissent
+    try:
+        await page.wait_for_selector('a[href*="/items/"]', timeout=15000)
+    except:
+        pass
+
+    await page.wait_for_timeout(2000)
+
     links = await page.query_selector_all('a[href*="/items/"]')
-
     items = []
-    for a in links:
+
+    for a in links[:50]:
         href = await a.get_attribute("href")
         if not href:
             continue
         if not href.startswith("http"):
             href = "https://www.vinted.fr" + href
 
-        # On remonte au “bloc” parent pour récupérer titre/prix/image
-        card = await a.evaluate_handle("el => el.closest('div')")
-        card_text = (await card.inner_text()) if card else ""
-        # price dans le texte
-        price = extract_price(card_text)
+        if href in seen:
+            continue
+
+        card = await a.evaluate_handle("el => el.closest('article') || el.closest('div')")
+        if not card:
+            continue
+
+        txt = (await card.inner_text()).strip()
+        if not txt:
+            continue
+
+        price = extract_price(txt)
         if price is None:
             continue
 
-        # title = on prend une ligne “raisonnable”
-        title = card_text.strip().split("\n")[0][:120] if card_text else "Annonce Vinted"
+        title = txt.split("\n")[0][:120]
 
-        # image
         img = None
-        if card:
-            img_el = await card.query_selector("img")
-            if img_el:
-                img = await img_el.get_attribute("src")
+        img_el = await card.query_selector("img")
+        if img_el:
+            img = await img_el.get_attribute("src")
 
-        key = href
-        items.append({"key": key, "title": title, "price": price, "url": href, "img": img})
+        items.append({
+            "key": href,
+            "title": title,
+            "price": price,
+            "url": href,
+            "img": img
+        })
 
-    # Dé-doublonnage (Vinted peut répéter)
-    uniq = {}
-    for it in items:
-        uniq[it["key"]] = it
-    return list(uniq.values())
+    return items
 
+async def send_alert(channel, item):
+    embed = discord.Embed(
+        title=f"{item['title']} — {item['price']}€",
+        url=item["url"],
+        color=0x00ff00
+    )
+
+    if item["img"]:
+        embed.set_image(url=item["img"])
+
+    await channel.send(embed=embed)
 
 async def scan_loop():
-    global debug_sent
-
     await client.wait_until_ready()
     channel = await client.fetch_channel(CHANNEL_ID)
 
-    # Playwright (headless)
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+        browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
 
-        await channel.send("✅ Scan démarré (Vinted via navigateur)")
+        print("✅ Scan démarré (Vinted via navigateur)")
 
         while not client.is_closed():
             try:
                 items = await fetch_vinted_items(page)
+                sent = 0
 
-                sent_now = 0
-                for it in items:
-                    if it["key"] in seen:
-                        continue
+                for item in items[:DEBUG_FIRST_N]:
+                    await send_alert(channel, item)
+                    seen.add(item["key"])
+                    sent += 1
 
-                    # Mode DEBUG : on force l’envoi des 3 premières annonces trouvées
-                    if debug_sent < DEBUG_FIRST_N:
-                        seen.add(it["key"])
-                        await send_item(channel, it["title"], it["price"], it["url"], it["img"], source="VINTED DEBUG")
-                        debug_sent += 1
-                        sent_now += 1
-                        continue
-
-                    # Mode normal : ici tu peux filtrer plus tard (prix cible etc.)
-                    # Pour l’instant on envoie tout ce qui est nouveau (sinon tu vas encore croire “ça marche pas”)
-                    seen.add(it["key"])
-                    await send_item(channel, it["title"], it["price"], it["url"], it["img"], source="VINTED")
-                    sent_now += 1
-
-                print(f"[SCAN] ok — items: {len(items)} — envoyés: {sent_now}")
+                print(f"[SCAN] items: {len(items)} — envoyés: {sent}")
 
             except Exception as e:
-                print("[SCAN] erreur:", repr(e))
+                print("[SCAN] erreur:", e)
 
             await asyncio.sleep(SCAN_INTERVAL)
-
 
 @client.event
 async def on_ready():
     print(f"Bot connecté en tant que {client.user}")
     client.loop.create_task(scan_loop())
-
 
 client.run(TOKEN)

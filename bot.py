@@ -8,6 +8,9 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
 
 SCAN_INTERVAL = 30
+DEBUG = True
+DEBUG_SEND = 10
+
 
 # ===== PRIX D'ACHAT QUE TU M'AS DONNÉS =====
 

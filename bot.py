@@ -248,49 +248,11 @@ async def scan_loop():
     await client.wait_until_ready()
     channel = await client.fetch_channel(CHANNEL_ID)
 
-    load_seen()
-    await channel.send("✅ BOT OPÉRATIONNEL — scan démarré.")
-
     while not client.is_closed():
-        try:
-            found = []
+        print("Scan actif")
+        await channel.send("🔍 Test annonce iPhone 14 Pro - 300€")
+        await asyncio.sleep(60)
 
-            for term in SEARCH_TERMS:
-                # Vinted (fonctionne souvent direct)
-                found.extend(scan_vinted(term))
-
-                # Leboncoin (peut nécessiter ajustements)
-                found.extend(scan_leboncoin(term))
-
-            new_count = 0
-
-            for ad in found:
-                key = ad["key"]
-                if key in seen_ads:
-                    continue
-
-                seen_ads.add(key)
-                new_count += 1
-
-                # Important: Leboncoin V1 met price "inconnu" => pas d'alert
-                await send_alert(
-                    channel,
-                    ad["source"],
-                    ad["title"],
-                    ad["price"],
-                    ad["link"],
-                )
-
-            if new_count:
-                save_seen()
-
-            # Petit heartbeat discret dans les logs Railway
-            print(f"[SCAN] ok — nouveaux éléments: {new_count}")
-
-        except Exception as e:
-            print("[SCAN] erreur:", repr(e))
-
-        await asyncio.sleep(SCAN_INTERVAL)
 
 @client.event
 async def on_ready():

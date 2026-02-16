@@ -120,9 +120,8 @@ async def scan_loop():
 @client.event
 async def on_ready():
     print(f"Bot connecté en tant que {client.user}")
-    
-    channel = client.get_channel(CHANNEL_ID)
-    await channel.send("✅ BOT OPÉRATIONNEL")
-    
-    client.loop.create_task(scan_loop())
 
+    channel = await client.fetch_channel(CHANNEL_ID)
+    await channel.send("✅ BOT OPÉRATIONNEL")
+
+    client.loop.create_task(scan_loop())

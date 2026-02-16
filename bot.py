@@ -164,10 +164,16 @@ def scan_vinted(term: str):
         "&per_page=20"
     )
     r = http_get(url)
+    print("[VINTED] url:", url)
+print("[VINTED] status:", r.status_code, "len:", len(r.text))
+
     if r.status_code != 200:
         return []
 
     data = r.json()
+print("[VINTED] keys:", list(data.keys())[:10])
+print("[VINTED] items_count:", len(data.get("items", []) or []))
+
     items = data.get("items", []) or []
     results = []
 

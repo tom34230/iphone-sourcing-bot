@@ -125,3 +125,5 @@ async def on_ready():
     await channel.send("✅ BOT OPÉRATIONNEL")
 
     client.loop.create_task(scan_loop())
+
+client.run(TOKEN)

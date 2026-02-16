@@ -1,23 +1,20 @@
 import os
 import asyncio
 import re
+import json
 import discord
 from playwright.async_api import async_playwright
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
 
-# ===== CONFIG =====
 SCAN_INTERVAL = 30  # secondes
 
-# DEBUG: envoie 10 annonces iPhone (même hors fourchette) pour valider que ça scrape bien
+# DEBUG: envoie 5 annonces même si hors fourchette (juste pour prouver que ça sort bien des iPhones)
 DEBUG = True
-DEBUG_SEND = 10
+DEBUG_SEND = 5
 
-# Recherche Vinted (newest first)
-VINTED_URL = "https://www.vinted.fr/catalog?search_text=iphone&order=newest_first"
-
-# ===== PRIX D'ACHAT (TES FOURCHETTES) =====
+# ===== TES FOURCHETTES ACHAT (min/max) =====
 BUY_RANGES = {
     "iphone 13 mini": (50, 120),
     "iphone 13": (50, 130),
@@ -40,50 +37,104 @@ BUY_RANGES = {
     "iphone 16 pro max": (190, 600),
 }
 
-# Accessoires à exclure
+# ===== EXCLUSIONS ACCESSOIRES =====
 BANNED_WORDS = [
-    "coque", "housse", "étui", "verre", "film", "protection",
-    "chargeur", "câble", "adaptateur", "support", "dock",
+    "coque", "housse", "étui", "verre trempé", "film", "protection",
+    "chargeur", "câble", "adaptateur", "support",
     "airpods", "écouteurs", "casque",
     "apple watch", "watch", "bracelet",
     "ipad", "macbook"
 ]
 
-# Regex robuste pour détecter iPhone 13-16 + variantes
-MODEL_REGEX = re.compile(
-    r"\biphone\s*(13|14|15|16)\s*(mini|plus|pro|max|pro\s*max)?\b",
-    re.IGNORECASE
-)
+# ===== Détection modèle robuste (gère "iphone15", "15 promax", etc.) =====
+MODEL_REGEX = re.compile(r"\biphone\s*([0-9]{2})\b", re.IGNORECASE)
+
+def normalize(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+def detect_model(title: str) -> str | None:
+    t = normalize(title)
+
+    # quick reject si pas iphone
+    if "iphone" not in t:
+        return None
+
+    # détecter génération
+    m = MODEL_REGEX.search(t.replace("iphone", "iphone "))
+    if not m:
+        return None
+    gen = m.group(1)
+    if gen not in ("13", "14", "15", "16"):
+        return None
+
+    # variantes
+    is_pro = " pro" in t or "pro " in t or " pro" in t.replace("promax", "pro max")
+    is_max = " max" in t or "pro max" in t or "promax" in t
+    is_plus = " plus" in t
+    is_mini = " mini" in t
+
+    # ordre logique
+    if gen == "13" and is_mini:
+        return "iphone 13 mini"
+    if is_pro and is_max:
+        return f"iphone {gen} pro max"
+    if is_pro:
+        return f"iphone {gen} pro"
+    if is_plus:
+        return f"iphone {gen} plus"
+    if " max" in t and gen in ("13","14","15","16"):
+        # au cas où "max" sans "pro"
+        return f"iphone {gen} max"
+    return f"iphone {gen}"
+
+def is_accessory(title: str) -> bool:
+    t = normalize(title)
+    return any(w in t for w in BANNED_WORDS)
+
+def parse_price_eur(price_str: str) -> int | None:
+    if not price_str:
+        return None
+    # Vinted renvoie souvent "123" ou "123.00" ou "123,00"
+    try:
+        return int(float(str(price_str).replace(",", ".")))
+    except:
+        return None
+
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
 seen = set()
 
+async def send_embed(channel, source, model, title, price, url, image_url, min_p=None, max_p=None, debug=False):
+    tag = "🧪 DEBUG" if debug else "✅ DEAL"
+    rng = "N/A" if (min_p is None or max_p is None) else f"{min_p}€ → {max_p}€"
 
-def extract_price(text: str):
-    # "100 €" ou "100,00 €"
-    m = re.search(r"(\d+(?:[.,]\d{1,2})?)\s*€", text)
-    if not m:
-        return None
-    return int(float(m.group(1).replace(",", ".")))
+    embed = discord.Embed(
+        title=f"{tag} — {model.upper()} — {price}€",
+        description=f"🎯 Fourchette achat : **{rng}**\n🔗 {url}",
+        color=0x00ff00 if (min_p is not None and max_p is not None and min_p <= price <= max_p) else 0xf1c40f
+    )
+    embed.add_field(name="Titre", value=title[:240], inline=False)
+    embed.add_field(name="Source", value=source, inline=True)
+    if image_url:
+        embed.set_image(url=image_url)
+
+    msg = await channel.send(embed=embed)
+    for r in ["👀", "💬", "❌", "🔥"]:
+        try:
+            await msg.add_reaction(r)
+        except:
+            pass
 
 
-def normalize_model(match: re.Match):
-    num = match.group(1)
-    var = (match.group(2) or "").lower().strip()
-    var = var.replace("  ", " ").replace("promax", "pro max")
-    if var == "pro max":
-        return f"iphone {num} pro max"
-    if var in ("mini", "plus", "pro", "max"):
-        return f"iphone {num} {var}"
-    return f"iphone {num}"
+async def fetch_vinted_json_via_playwright(page):
+    """
+    On ouvre Vinted en navigateur (anti-403), puis on appelle l'API depuis le contexte navigateur.
+    """
+    await page.goto("https://www.vinted.fr", wait_until="domcontentloaded", timeout=60000)
 
-
-async def fetch_vinted_items(page):
-    await page.goto(VINTED_URL, wait_until="domcontentloaded", timeout=60000)
-
-    # Accepter cookies si présents
+    # Cookies (si popup)
     for txt in ["Tout accepter", "Accepter", "J'accepte", "OK"]:
         btn = page.get_by_role("button", name=txt)
         if await btn.count() > 0:
@@ -93,112 +144,24 @@ async def fetch_vinted_items(page):
             except:
                 pass
 
-    # Attendre les annonces
-    try:
-        await page.wait_for_selector('a[href*="/items/"]', timeout=15000)
-    except:
-        pass
-
-    await page.wait_for_timeout(1500)
-
-    links = await page.query_selector_all('a[href*="/items/"]')
-    items = []
-
-    for a in links[:120]:
-        href = await a.get_attribute("href")
-        if not href:
-            continue
-        if not href.startswith("http"):
-            href = "https://www.vinted.fr" + href
-
-        if href in seen:
-            continue
-
-        card = await a.evaluate_handle("el => el.closest('article') || el.closest('div')")
-        if not card:
-            continue
-
-        txt = (await card.inner_text()).strip()
-        if not txt:
-            continue
-
-        lower = txt.lower()
-
-        # Exclure accessoires
-        if any(w in lower for w in BANNED_WORDS):
-            continue
-
-        # Garder uniquement iPhone 13 -> 16
-        m = MODEL_REGEX.search(lower)
-        if not m:
-            continue
-
-        model = normalize_model(m)
-
-        price = extract_price(txt)
-        if price is None:
-            continue
-
-        # Filtre fourchette (désactivé en DEBUG)
-        min_p, max_p = BUY_RANGES.get(model, (None, None))
-        if (not DEBUG) and (min_p is not None) and (not (min_p <= price <= max_p)):
-            continue
-
-        img = None
-        img_el = await card.query_selector("img")
-        if img_el:
-            img = await img_el.get_attribute("src")
-
-        # Titre plus propre
-        first_line = txt.split("\n")[0][:90]
-
-        items.append({
-            "key": href,
-            "model": model,
-            "title": first_line,
-            "price": price,
-            "url": href,
-            "img": img,
-            "min": min_p,
-            "max": max_p
-        })
-
-    return items
-
-
-async def send_alert(channel, item):
-    model = item["model"]
-    price = item["price"]
-    url = item["url"]
-    img = item["img"]
-    min_p = item["min"]
-    max_p = item["max"]
-
-    # Label debug
-    tag = "🧪 DEBUG" if DEBUG else "✅ DEAL"
-
-    # Fourchette affichée (si connue)
-    range_txt = f"{min_p}€ → {max_p}€" if (min_p is not None and max_p is not None) else "N/A"
-
-    embed = discord.Embed(
-        title=f"{tag} — {model.upper()} — {price}€",
-        description=f"🎯 Fourchette achat : **{range_txt}**\n🔗 {url}",
-        color=0x00ff00 if (min_p is not None and max_p is not None and min_p <= price <= max_p) else 0xf1c40f
+    api_url = (
+        "https://www.vinted.fr/api/v2/catalog/items"
+        "?search_text=iphone"
+        "&order=newest_first"
+        "&per_page=40"
+        "&page=1"
     )
 
-    embed.add_field(name="Titre annonce", value=item["title"], inline=False)
-
-    if img:
-        embed.set_image(url=img)
-
-    await channel.send(embed=embed)
+    resp = await page.request.get(api_url)
+    status = resp.status
+    text = await resp.text()
+    return status, text
 
 
 async def scan_loop():
     await client.wait_until_ready()
     channel = await client.fetch_channel(CHANNEL_ID)
-
-    await channel.send("✅ Scan démarré (Vinted via navigateur)")
+    await channel.send("✅ Scan Vinted (API via navigateur) démarré")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
@@ -206,19 +169,78 @@ async def scan_loop():
 
         while not client.is_closed():
             try:
-                items = await fetch_vinted_items(page)
+                status, txt = await fetch_vinted_json_via_playwright(page)
+                if status != 200:
+                    print(f"[VINTED] status={status} (bloqué ?)")
+                    await asyncio.sleep(SCAN_INTERVAL)
+                    continue
 
-                sent = 0
+                data = json.loads(txt)
+                items = data.get("items", []) or []
+                print(f"[SCAN] items API: {len(items)}")
+
+                debug_sent = 0
+                deals_sent = 0
+
                 for it in items:
-                    await send_alert(channel, it)
-                    seen.add(it["key"])
-                    sent += 1
+                    item_id = it.get("id")
+                    if not item_id:
+                        continue
+                    key = f"vinted:{item_id}"
+                    if key in seen:
+                        continue
 
-                    # En DEBUG on limite à 10 messages / cycle
-                    if DEBUG and sent >= DEBUG_SEND:
-                        break
+                    title = it.get("title") or ""
+                    if not title:
+                        continue
 
-                print(f"[SCAN] items filtrés: {len(items)} — envoyés: {sent}")
+                    # filtre accessoires
+                    if is_accessory(title):
+                        continue
+
+                    model = detect_model(title)
+                    if not model:
+                        continue
+
+                    # prix
+                    price = parse_price_eur(it.get("price"))
+                    if price is None:
+                        continue
+
+                    # lien
+                    url = it.get("url")
+                    if url and url.startswith("/"):
+                        url = "https://www.vinted.fr" + url
+                    if not url:
+                        url = f"https://www.vinted.fr/items/{item_id}"
+
+                    # image
+                    image_url = None
+                    photos = it.get("photos") or []
+                    if photos:
+                        p0 = photos[0]
+                        image_url = p0.get("full_size_url") or p0.get("high_resolution_url") or p0.get("url")
+
+                    min_p, max_p = BUY_RANGES.get(model, (None, None))
+
+                    # DEBUG: on envoie quelques annonces même hors fourchette
+                    if DEBUG and debug_sent < DEBUG_SEND:
+                        seen.add(key)
+                        await send_embed(channel, "Vinted", model, title, price, url, image_url, min_p, max_p, debug=True)
+                        debug_sent += 1
+                        continue
+
+                    # Mode normal: uniquement dans ta fourchette
+                    if min_p is None or max_p is None:
+                        continue
+                    if not (min_p <= price <= max_p):
+                        continue
+
+                    seen.add(key)
+                    await send_embed(channel, "Vinted", model, title, price, url, image_url, min_p, max_p, debug=False)
+                    deals_sent += 1
+
+                print(f"[SCAN] debug_sent={debug_sent} deals_sent={deals_sent}")
 
             except Exception as e:
                 print("[SCAN] erreur:", repr(e))

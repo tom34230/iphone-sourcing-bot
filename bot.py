@@ -106,12 +106,14 @@ async def send_alert(channel, title, price, link):
 
 async def scan_loop():
     await client.wait_until_ready()
-channel = await client.fetch_channel(CHANNEL_ID)
+    channel = await client.fetch_channel(CHANNEL_ID)
 
     while not client.is_closed():
         print("Scan actif")
         await channel.send("Je suis vivant 👀")
         await asyncio.sleep(60)
+
+
 
 
 

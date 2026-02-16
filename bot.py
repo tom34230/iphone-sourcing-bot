@@ -1,7 +1,6 @@
 import os
 import asyncio
 import requests
-from bs4 import BeautifulSoup
 import discord
 
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -12,49 +11,77 @@ client = discord.Client(intents=intents)
 
 seen = set()
 
-async def scan_leboncoin(channel):
-    url = "https://www.leboncoin.fr/recherche?text=iphone"
+SEARCH_TERMS = ["iphone 13", "iphone 14", "iphone 15", "iphone 16"]
+
+def scan_vinted(term: str):
+    url = (
+        "https://www.vinted.fr/api/v2/catalog/items"
+        f"?search_text={requests.utils.quote(term)}"
+        "&order=newest_first"
+        "&per_page=10"
+    )
 
     headers = {
-        "User-Agent": "Mozilla/5.0"
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
     }
 
-    r = requests.get(url, headers=headers)
+    r = requests.get(url, headers=headers, timeout=15)
+    print("[VINTED] status:", r.status_code, "len:", len(r.text))
 
     if r.status_code != 200:
-        print("Erreur Leboncoin")
-        return
+        return []
 
-    soup = BeautifulSoup(r.text, "html.parser")
+    data = r.json()
+    items = data.get("items", []) or []
+    print("[VINTED] items:", len(items))
 
-    ads = soup.find_all("a", href=True)
+    results = []
+    for it in items:
+        item_id = it.get("id")
+        title = it.get("title") or ""
+        price_str = (it.get("price") or "").replace(",", ".")
+        try:
+            price = int(float(price_str))
+        except Exception:
+            continue
 
-    count = 0
+        link = it.get("url")
+        if link and link.startswith("/"):
+            link = "https://www.vinted.fr" + link
 
-    for ad in ads:
-        text = ad.get_text().strip()
+        results.append((f"vinted:{item_id}", title, price, link or "https://www.vinted.fr"))
 
-        if "iphone" in text.lower() and len(text) > 10:
-            if text in seen:
-                continue
-
-            seen.add(text)
-            await channel.send(f"📱 {text}")
-            count += 1
-
-        if count >= 3:  # MODE DEBUG : max 3 annonces
-            break
-
+    return results
 
 @client.event
 async def on_ready():
     print(f"Bot connecté en tant que {client.user}")
     channel = await client.fetch_channel(CHANNEL_ID)
-    await channel.send("🚀 SCAN LEBONCOIN LANCÉ")
+    await channel.send("✅ BOT OPÉRATIONNEL — scan Vinted démarré.")
 
     while True:
-        await scan_leboncoin(channel)
-        await asyncio.sleep(60)
+        try:
+            sent = 0
+            for term in SEARCH_TERMS:
+                for key, title, price, link in scan_vinted(term):
+                    if key in seen:
+                        continue
+                    seen.add(key)
 
+                    await channel.send(f"🆕 VINTED | {title} | {price}€\n{link}")
+                    sent += 1
+
+                    if sent >= 5:  # debug: max 5 messages par cycle
+                        break
+                if sent >= 5:
+                    break
+
+            print("[SCAN] cycle ok — envoyés:", sent)
+
+        except Exception as e:
+            print("[SCAN] erreur:", repr(e))
+
+        await asyncio.sleep(60)
 
 client.run(TOKEN)
